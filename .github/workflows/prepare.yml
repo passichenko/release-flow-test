@@ -1,0 +1,94 @@
+name: Prepare candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      item:
+        description: Item to add
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: candidate
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+      - name: Configure Git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Advance source
+        env:
+          ITEM: ${{ inputs.item }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin source >/dev/null 2>&1; then
+            git fetch origin source
+            git switch --create source --track origin/source
+          else
+            git switch --create source origin/main
+          fi
+          printf '%s\n' "$ITEM" >> data/items.txt
+          git add data/items.txt
+          git commit -m "add: $ITEM"
+          git push origin HEAD:source
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Prepare reusable candidate
+        run: |
+          set -euo pipefail
+          old=$(git ls-remote origin refs/heads/candidate | awk '{print $1}')
+          git switch --force-create candidate "$SOURCE_SHA"
+          current=$(git show origin/main:VERSION)
+          version=$((current + 1))
+          printf '%s\n' "$version" > VERSION
+          {
+            echo '# Changelog'
+            echo
+            echo "## $version"
+            echo
+            echo "- Promote source $SOURCE_SHA."
+            echo
+            tail -n +2 CHANGELOG.md
+          } > /tmp/CHANGELOG.md
+          mv /tmp/CHANGELOG.md CHANGELOG.md
+          printf '{"base":"%s","source":"%s","version":%s}\n' \
+            "$(git rev-parse origin/main)" "$SOURCE_SHA" "$version" > .candidate.json
+          git add VERSION CHANGELOG.md .candidate.json
+          git commit -m "release: $version"
+          candidate=$(git rev-parse HEAD)
+          if [[ -n "$old" ]]; then
+            git push --force-with-lease="refs/heads/candidate:$old" origin HEAD:candidate
+          else
+            git push origin HEAD:candidate
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+          echo "BASE_SHA=$(git rev-parse origin/main)" >> "$GITHUB_ENV"
+      - name: Open or update draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          body="Base: \`$BASE_SHA\`  
+          Source: \`$SOURCE_SHA\`  
+          Candidate: \`$CANDIDATE_SHA\`  
+          Version: \`$VERSION\`  
+
+          Approval authorizes automatic promotion and release."
+          pr=$(gh pr list --head candidate --base main --state open --json number --jq '.[0].number // empty')
+          if [[ -z "$pr" ]]; then
+            gh pr create --draft --head candidate --base main --title "release: $VERSION" --body "$body"
+          else
+            gh pr edit "$pr" --title "release: $VERSION" --body "$body"
+            gh pr ready "$pr" --undo || true
+          fi

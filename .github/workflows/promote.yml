@@ -1,0 +1,69 @@
+name: Promote approved candidate
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: >-
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'candidate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+      - name: Verify current approved candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          APPROVED_SHA: ${{ github.event.review.commit_id }}
+        run: |
+          set -euo pipefail
+          pr=$(gh pr view "$PR" --json state,isDraft,headRefOid,baseRefOid)
+          [[ $(jq -r '.state' <<< "$pr") == OPEN ]]
+          [[ $(jq -r '.isDraft' <<< "$pr") == true ]]
+          candidate=$(jq -r '.headRefOid' <<< "$pr")
+          base=$(jq -r '.baseRefOid' <<< "$pr")
+          [[ "$candidate" == "$APPROVED_SHA" ]]
+          git fetch origin main source candidate
+          [[ $(git rev-parse origin/main) == "$base" ]]
+          [[ $(git rev-parse origin/candidate) == "$candidate" ]]
+          receipt=$(git show "$candidate:.candidate.json")
+          [[ $(jq -r '.base' <<< "$receipt") == "$base" ]]
+          source=$(jq -r '.source' <<< "$receipt")
+          version=$(jq -r '.version' <<< "$receipt")
+          [[ $(git rev-parse origin/source) == "$source" ]]
+          [[ $(git rev-parse "$candidate^") == "$source" ]]
+          changed=$(git diff --name-only "$source..$candidate" | sort)
+          [[ "$changed" == $'.candidate.json\nCHANGELOG.md\nVERSION' ]]
+          ! git diff --name-only "$base..$candidate" | grep -q '^.github/workflows/'
+          [[ $(git show "$candidate:VERSION") == "$version" ]]
+          echo "BASE=$base" >> "$GITHUB_ENV"
+          echo "CANDIDATE=$candidate" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Fast-forward main
+        run: |
+          set -euo pipefail
+          [[ $(git ls-remote origin refs/heads/main | awk '{print $1}') == "$BASE" ]]
+          git push origin "$CANDIDATE:refs/heads/main"
+          [[ $(git ls-remote origin refs/heads/main | awk '{print $1}') == "$CANDIDATE" ]]
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" --target "$CANDIDATE" --title "Version $VERSION" --notes "Approved in PR #${{ github.event.pull_request.number }}."
+      - name: Synchronize source
+        run: |
+          git push origin "$CANDIDATE:refs/heads/source"
+          [[ $(git ls-remote origin refs/heads/source | awk '{print $1}') == "$CANDIDATE" ]]
