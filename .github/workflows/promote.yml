@@ -23,6 +23,22 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
+      - name: Configure promotion key
+        env:
+          PROMOTION_KEY: ${{ secrets.PROMOTION_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$PROMOTION_KEY" > "$HOME/.ssh/promotion"
+          chmod 0600 "$HOME/.ssh/promotion"
+          ssh-keyscan github.com > "$HOME/.ssh/known_hosts" 2>/dev/null
+          cat > "$HOME/.ssh/config" <<'EOF'
+          Host github.com
+            IdentityFile ~/.ssh/promotion
+            IdentitiesOnly yes
+          EOF
+          chmod 0600 "$HOME/.ssh/config"
+          git remote set-url origin "git@github.com:$GITHUB_REPOSITORY.git"
       - name: Verify current approved candidate
         env:
           GH_TOKEN: ${{ github.token }}
